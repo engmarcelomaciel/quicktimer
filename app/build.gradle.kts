@@ -16,10 +16,24 @@ android {
         versionName = "2.0"
     }
 
+    // Chave fixa: todo build (local ou GitHub) sai com a mesma assinatura,
+    // então "adb install -r" atualiza sem precisar desinstalar.
+    signingConfigs {
+        create("fixed") {
+            storeFile = file("quicktimer.jks")
+            storePassword = "quicktimer"
+            keyAlias = "quicktimer"
+            keyPassword = "quicktimer"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("fixed")
+        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("fixed")
         }
     }
     compileOptions {
