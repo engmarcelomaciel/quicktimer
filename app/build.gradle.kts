@@ -12,8 +12,8 @@ android {
         applicationId = "com.comntrol.quicktimer"
         minSdk = 30
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0"
+        versionCode = 3
+        versionName = "2.1"
     }
 
     // Chave fixa: todo build (local ou GitHub) sai com a mesma assinatura,

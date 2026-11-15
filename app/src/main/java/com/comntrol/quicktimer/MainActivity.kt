@@ -22,10 +22,13 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -41,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -100,7 +104,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             TimerScreen(
                 showHr = showHr,
                 heartRate = heartRate,
-                hint = "Toque +" + Prefs.secondsLabel(Prefs.incSeconds(this)) + " · ↓ desfaz",
                 onTap = { addIncrement() },
                 onLongPress = { TimerController.cancel(this) },
                 onSwipeDown = {
@@ -210,7 +213,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 }
 
 // ---------------------------------------------------------------------------
-// UI
+// UI — layout v3: números grandes para leitura sem óculos
 // ---------------------------------------------------------------------------
 
 val Orange = Color(0xFFFF6B00)
@@ -222,7 +225,6 @@ private val HeartRed = Color(0xFFFF4D5E)
 private fun TimerScreen(
     showHr: Boolean,
     heartRate: Int,
-    hint: String,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
     onSwipeDown: () -> Unit
@@ -230,7 +232,7 @@ private fun TimerScreen(
     val state by TimerController.state.collectAsState()
     var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
-    // Relógio da tela: 60 fps nos 10 s finais (animação fluida), ~25 fps no resto.
+    // 60 fps nos 10 s finais (pulso fluido); ~25 fps no resto para poupar bateria.
     LaunchedEffect(Unit) {
         while (true) {
             withFrameMillis { now = SystemClock.elapsedRealtime() }
@@ -241,10 +243,10 @@ private fun TimerScreen(
 
     val remaining = (state.endAt - now).coerceAtLeast(0L)
     val progress = if (state.totalMs > 0) (remaining.toFloat() / state.totalMs).coerceIn(0f, 1f) else 0f
-    val totalSec = (remaining / 1000).toInt()
+    // Arredonda para cima: mostra 00:01 até o último instante, e 01:00 logo no início.
+    val totalSec = ((remaining + 999) / 1000).toInt()
     val mm = totalSec / 60
     val ss = totalSec % 60
-    val centis = ((remaining % 1000) / 10).toInt()
 
     // Pulso nos 10 s finais: sobe e desce suavemente uma vez por segundo.
     val pulse = if (remaining in 1L..10_000L) {
@@ -252,8 +254,8 @@ private fun TimerScreen(
         sin(PI * frac).toFloat().coerceIn(0f, 1f)
     } else 0f
     val digitColor = lerp(Color.White, Orange, pulse)
-    val digitWeight = FontWeight((300 + 400 * pulse).toInt().coerceIn(100, 900))
-    val digitScale = 1f + 0.10f * pulse
+    val digitWeight = FontWeight((500 + 300 * pulse).toInt().coerceIn(100, 900))
+    val digitScale = 1f + 0.08f * pulse
 
     val showFlash = now < state.flashUntil
 
@@ -280,6 +282,7 @@ private fun TimerScreen(
             },
         contentAlignment = Alignment.Center
     ) {
+        // Arco de progresso
         Canvas(modifier = Modifier.fillMaxSize().padding(6.dp)) {
             val stroke = 10.dp.toPx()
             val inset = stroke / 2
@@ -295,60 +298,76 @@ private fun TimerScreen(
             )
         }
 
+        // Série (ou "+1 min" / "−1 min") perto da borda superior
+        BasicText(
+            text = if (showFlash) state.flashText else "Série ${state.series}",
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 30.dp),
+            style = TextStyle(
+                color = if (showFlash) Orange else Gray,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                textAlign = TextAlign.Center
+            )
+        )
+
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(top = 10.dp)
         ) {
             BasicText(
-                text = if (showFlash) state.flashText else "Série ${state.series}",
-                style = TextStyle(
-                    color = if (showFlash) Orange else Gray,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    textAlign = TextAlign.Center
-                )
-            )
-            Spacer(Modifier.height(2.dp))
-            BasicText(
                 text = "%02d:%02d".format(mm, ss),
+                maxLines = 1,
+                softWrap = false,
                 modifier = Modifier.graphicsLayer {
                     scaleX = digitScale
                     scaleY = digitScale
                 },
                 style = TextStyle(
                     color = digitColor,
-                    fontSize = 54.sp,
+                    fontSize = 74.sp,
                     fontWeight = digitWeight,
                     fontFamily = FontFamily.SansSerif,
-                    textAlign = TextAlign.Center
-                )
-            )
-            BasicText(
-                text = ".%02d".format(centis),
-                style = TextStyle(
-                    color = Orange,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Light,
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    letterSpacing = (-1).sp
                 )
             )
             if (showHr) {
                 Spacer(Modifier.height(4.dp))
-                BasicText(
-                    text = if (heartRate > 0) "♥ $heartRate bpm" else "♥ -- bpm",
-                    style = TextStyle(
-                        color = HeartRed,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        textAlign = TextAlign.Center
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    HeartIcon(Modifier.size(30.dp))
+                    Spacer(Modifier.width(8.dp))
+                    BasicText(
+                        text = if (heartRate > 0) "$heartRate" else "--",
+                        maxLines = 1,
+                        style = TextStyle(
+                            color = HeartRed,
+                            fontSize = 42.sp,
+                            fontWeight = FontWeight.Medium,
+                            fontFamily = FontFamily.SansSerif
+                        )
                     )
-                )
+                }
             }
-            Spacer(Modifier.height(6.dp))
-            BasicText(
-                text = hint,
-                style = TextStyle(color = Gray, fontSize = 10.sp, textAlign = TextAlign.Center)
-            )
         }
+    }
+}
+
+@Composable
+private fun HeartIcon(modifier: Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val p = Path().apply {
+            moveTo(w * 0.5f, h * 0.92f)
+            cubicTo(w * 0.12f, h * 0.62f, -w * 0.04f, h * 0.30f, w * 0.20f, h * 0.12f)
+            cubicTo(w * 0.36f, h * 0.02f, w * 0.48f, h * 0.14f, w * 0.5f, h * 0.24f)
+            cubicTo(w * 0.52f, h * 0.14f, w * 0.64f, h * 0.02f, w * 0.80f, h * 0.12f)
+            cubicTo(w * 1.04f, h * 0.30f, w * 0.88f, h * 0.62f, w * 0.5f, h * 0.92f)
+            close()
+        }
+        drawPath(p, HeartRed)
     }
 }
