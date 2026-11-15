@@ -1,20 +1,24 @@
 package com.comntrol.quicktimer
 
-import android.content.Context
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
 import android.view.KeyEvent
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,10 +28,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -35,6 +43,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -42,156 +52,210 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
-import kotlinx.coroutines.Job
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.sin
 
 /**
- * Contagem regressiva acionada pelo botão de ação (Quick button) do Galaxy Watch.
- *
- * - Ao abrir: inicia 1 minuto.
- * - Cada novo acionamento do botão com o app aberto: +1 minuto.
- *   (O sistema reentrega o app via onNewIntent; se o botão chegar como tecla
- *   STEM, também é tratado em onKeyDown.)
- * - Toque na tela: também soma +1 minuto (alternativa manual).
- * - Toque longo na tela ou deslizar para a direita: cancela e fecha.
- * - Ao zerar: vibra e fecha, voltando ao app que estava antes.
+ * Tela do timer.
+ * - Aberto pelo atalho (tecla Início 2x) sem timer rodando → inicia nova série.
+ * - Atalho de novo com a tela visível, toque ou tecla STEM → soma o incremento.
+ * - Deslizar para baixo → desfaz um incremento.
+ * - Toque longo → cancela.
+ * - Sair do app (tecla Início) → a contagem continua em segundo plano.
+ * - Reabrir com o timer rodando em segundo plano → só mostra, sem somar.
  */
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), SensorEventListener {
 
     companion object {
-        private const val ONE_MINUTE_MS = 60_000L
-        private const val DEBOUNCE_MS = 400L   // evita somar 2x no mesmo clique
-        private const val TICK_MS = 50L
-        private const val FLASH_MS = 900L
+        const val ACTION_SHOW = "com.comntrol.quicktimer.SHOW"
+        private const val DEBOUNCE_MS = 400L
     }
 
-    private var endAt = 0L                 // SystemClock.elapsedRealtime() do fim
-    private var totalMs by mutableLongStateOf(ONE_MINUTE_MS)
-    private var remainingMs by mutableLongStateOf(ONE_MINUTE_MS)
-    private var flashUntil by mutableLongStateOf(0L)
+    private var heartRate by mutableIntStateOf(0)
+    private var sensorManager: SensorManager? = null
     private var lastAddAt = 0L
-    private var tickJob: Job? = null
+
+    private val permLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            startHeartRate()
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val now = SystemClock.elapsedRealtime()
-        if (savedInstanceState != null && savedInstanceState.getLong("endAt") > now) {
-            endAt = savedInstanceState.getLong("endAt")
-            totalMs = savedInstanceState.getLong("totalMs")
-        } else {
-            endAt = now + ONE_MINUTE_MS
-            totalMs = ONE_MINUTE_MS
+        if (savedInstanceState == null) handleEntry(intent, visible = false)
+        if (!TimerController.state.value.running) {
+            finishAndRemoveTask()
+            return
         }
-        lastAddAt = now
 
+        val showHr = Prefs.showHr(this)
         setContent {
             TimerScreen(
-                remainingMs = remainingMs,
-                totalMs = totalMs,
-                showFlash = SystemClock.elapsedRealtime() < flashUntil,
-                onTap = { addMinute() },
-                onLongPress = { closeApp(vibrate = false) }
+                showHr = showHr,
+                heartRate = heartRate,
+                hint = "Toque +" + Prefs.secondsLabel(Prefs.incSeconds(this)) + " · ↓ desfaz",
+                onTap = { addIncrement() },
+                onLongPress = { TimerController.cancel(this) },
+                onSwipeDown = {
+                    if (TimerController.subtract(this)) Haptics.vibrate(this, Haptics.TICK)
+                    else Haptics.vibrate(this, Haptics.DENIED)
+                }
             )
         }
-        startTicking()
+
+        // Fecha a tela quando o timer termina ou é cancelado.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                TimerController.state.collect { if (!it.running) finishAndRemoveTask() }
+            }
+        }
+
+        askPermissionsOnce()
     }
 
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        outState.putLong("endAt", endAt)
-        outState.putLong("totalMs", totalMs)
-    }
-
-    /** Botão de ação pressionado de novo com o app já aberto. */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        addMinute()
+        val visible = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        handleEntry(intent, visible)
     }
 
-    /** Caso o firmware entregue o botão físico como tecla STEM. */
+    private fun handleEntry(intent: Intent?, visible: Boolean) {
+        val running = TimerController.state.value.running
+        when {
+            intent?.action == ACTION_SHOW -> Unit          // toque no indicador do mostrador
+            !running -> TimerController.start(this)        // nova série
+            visible -> addIncrement()                      // atalho com a tela aberta
+            else -> Unit                                   // voltando do segundo plano: só mostra
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (TimerController.state.value.running) TimerService.ensureRunning(this)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        startHeartRate()
+    }
+
+    override fun onStop() {
+        stopHeartRate()
+        super.onStop()
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         return when (keyCode) {
             KeyEvent.KEYCODE_STEM_1,
             KeyEvent.KEYCODE_STEM_2,
             KeyEvent.KEYCODE_STEM_3 -> {
-                if (event?.repeatCount == 0) addMinute()
+                if (event?.repeatCount == 0) addIncrement()
                 true
             }
             else -> super.onKeyDown(keyCode, event)
         }
     }
 
-    private fun addMinute() {
+    private fun addIncrement() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastAddAt < DEBOUNCE_MS) return
         lastAddAt = now
-
-        endAt = maxOf(endAt, now) + ONE_MINUTE_MS
-        totalMs += ONE_MINUTE_MS
-        flashUntil = now + FLASH_MS
-        remainingMs = endAt - now
-        vibrate(longArrayOf(0, 40))
-        if (tickJob?.isActive != true) startTicking()
+        if (TimerController.add(this)) Haptics.vibrate(this, Haptics.TICK)
     }
 
-    private fun startTicking() {
-        tickJob = lifecycleScope.launch {
-            while (isActive) {
-                val left = endAt - SystemClock.elapsedRealtime()
-                if (left <= 0) {
-                    remainingMs = 0
-                    closeApp(vibrate = true)
-                    break
-                }
-                remainingMs = left
-                delay(TICK_MS)
-            }
-        }
+    // --- Permissões ---
+
+    private fun askPermissionsOnce() {
+        if (Prefs.permsAsked(this)) return
+        val wanted = mutableListOf<String>()
+        if (Prefs.showHr(this)) wanted += Manifest.permission.BODY_SENSORS
+        if (Build.VERSION.SDK_INT >= 33) wanted += Manifest.permission.POST_NOTIFICATIONS
+        val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        Prefs.setPermsAsked(this)
+        if (missing.isNotEmpty()) permLauncher.launch(missing.toTypedArray())
     }
 
-    private fun closeApp(vibrate: Boolean) {
-        tickJob?.cancel()
-        if (vibrate) vibrate(longArrayOf(0, 300, 150, 300, 150, 300))
-        finishAndRemoveTask()
+    // --- Frequência cardíaca ---
+
+    private fun startHeartRate() {
+        stopHeartRate()
+        if (!Prefs.showHr(this)) return
+        if (checkSelfPermission(Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) return
+        val sm = getSystemService(SENSOR_SERVICE) as SensorManager
+        val sensor = sm.getDefaultSensor(Sensor.TYPE_HEART_RATE) ?: return
+        sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+        sensorManager = sm
     }
 
-    private fun vibrate(pattern: LongArray) {
-        val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-        }
-        vibrator?.vibrate(VibrationEffect.createWaveform(pattern, -1))
+    private fun stopHeartRate() {
+        sensorManager?.unregisterListener(this)
+        sensorManager = null
+        heartRate = 0
     }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event == null || event.sensor.type != Sensor.TYPE_HEART_RATE) return
+        val bpm = event.values.firstOrNull()?.toInt() ?: 0
+        if (bpm > 0 && event.accuracy >= SensorManager.SENSOR_STATUS_ACCURACY_LOW) heartRate = bpm
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 }
 
 // ---------------------------------------------------------------------------
-// UI — visual no estilo do cronômetro Samsung (fundo preto, arco laranja Ultra)
+// UI
 // ---------------------------------------------------------------------------
 
-private val Orange = Color(0xFFFF6B00)
+val Orange = Color(0xFFFF6B00)
 private val Track = Color(0xFF2A2A2A)
 private val Gray = Color(0xFF9A9A9A)
+private val HeartRed = Color(0xFFFF4D5E)
 
 @Composable
 private fun TimerScreen(
-    remainingMs: Long,
-    totalMs: Long,
-    showFlash: Boolean,
+    showHr: Boolean,
+    heartRate: Int,
+    hint: String,
     onTap: () -> Unit,
-    onLongPress: () -> Unit
+    onLongPress: () -> Unit,
+    onSwipeDown: () -> Unit
 ) {
-    val progress = if (totalMs > 0) (remainingMs.toFloat() / totalMs).coerceIn(0f, 1f) else 0f
-    val totalSec = (remainingMs / 1000).toInt()
+    val state by TimerController.state.collectAsState()
+    var now by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+
+    // Relógio da tela: 60 fps nos 10 s finais (animação fluida), ~25 fps no resto.
+    LaunchedEffect(Unit) {
+        while (true) {
+            withFrameMillis { now = SystemClock.elapsedRealtime() }
+            val left = TimerController.state.value.endAt - SystemClock.elapsedRealtime()
+            if (left > 11_000L) delay(40)
+        }
+    }
+
+    val remaining = (state.endAt - now).coerceAtLeast(0L)
+    val progress = if (state.totalMs > 0) (remaining.toFloat() / state.totalMs).coerceIn(0f, 1f) else 0f
+    val totalSec = (remaining / 1000).toInt()
     val mm = totalSec / 60
     val ss = totalSec % 60
-    val centis = ((remainingMs % 1000) / 10).toInt()
+    val centis = ((remaining % 1000) / 10).toInt()
+
+    // Pulso nos 10 s finais: sobe e desce suavemente uma vez por segundo.
+    val pulse = if (remaining in 1L..10_000L) {
+        val frac = (remaining % 1000L) / 1000f
+        sin(PI * frac).toFloat().coerceIn(0f, 1f)
+    } else 0f
+    val digitColor = lerp(Color.White, Orange, pulse)
+    val digitWeight = FontWeight((300 + 400 * pulse).toInt().coerceIn(100, 900))
+    val digitScale = 1f + 0.10f * pulse
+
+    val showFlash = now < state.flashUntil
 
     Box(
         modifier = Modifier
@@ -202,22 +266,31 @@ private fun TimerScreen(
                     onTap = { onTap() },
                     onLongPress = { onLongPress() }
                 )
+            }
+            .pointerInput(Unit) {
+                var dragged = 0f
+                detectVerticalDragGestures(
+                    onDragStart = { dragged = 0f },
+                    onDragEnd = { if (dragged > 50.dp.toPx()) onSwipeDown() },
+                    onVerticalDrag = { change, dy ->
+                        change.consume()
+                        dragged += dy
+                    }
+                )
             },
         contentAlignment = Alignment.Center
     ) {
-        // Arco de progresso
         Canvas(modifier = Modifier.fillMaxSize().padding(6.dp)) {
             val stroke = 10.dp.toPx()
             val inset = stroke / 2
             val arcSize = Size(size.width - stroke, size.height - stroke)
             drawArc(
                 color = Track, startAngle = -90f, sweepAngle = 360f, useCenter = false,
-                topLeft = Offset(inset, inset), size = arcSize,
-                style = Stroke(width = stroke)
+                topLeft = Offset(inset, inset), size = arcSize, style = Stroke(width = stroke)
             )
             drawArc(
-                color = Orange, startAngle = -90f, sweepAngle = 360f * progress,
-                useCenter = false, topLeft = Offset(inset, inset), size = arcSize,
+                color = Orange, startAngle = -90f, sweepAngle = 360f * progress, useCenter = false,
+                topLeft = Offset(inset, inset), size = arcSize,
                 style = Stroke(width = stroke, cap = StrokeCap.Round)
             )
         }
@@ -227,7 +300,7 @@ private fun TimerScreen(
             verticalArrangement = Arrangement.Center
         ) {
             BasicText(
-                text = if (showFlash) "+1 min" else "Timer",
+                text = if (showFlash) state.flashText else "Série ${state.series}",
                 style = TextStyle(
                     color = if (showFlash) Orange else Gray,
                     fontSize = 15.sp,
@@ -238,10 +311,14 @@ private fun TimerScreen(
             Spacer(Modifier.height(2.dp))
             BasicText(
                 text = "%02d:%02d".format(mm, ss),
+                modifier = Modifier.graphicsLayer {
+                    scaleX = digitScale
+                    scaleY = digitScale
+                },
                 style = TextStyle(
-                    color = Color.White,
+                    color = digitColor,
                     fontSize = 54.sp,
-                    fontWeight = FontWeight.Light,
+                    fontWeight = digitWeight,
                     fontFamily = FontFamily.SansSerif,
                     textAlign = TextAlign.Center
                 )
@@ -250,15 +327,27 @@ private fun TimerScreen(
                 text = ".%02d".format(centis),
                 style = TextStyle(
                     color = Orange,
-                    fontSize = 22.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Light,
                     textAlign = TextAlign.Center
                 )
             )
-            Spacer(Modifier.height(10.dp))
+            if (showHr) {
+                Spacer(Modifier.height(4.dp))
+                BasicText(
+                    text = if (heartRate > 0) "♥ $heartRate bpm" else "♥ -- bpm",
+                    style = TextStyle(
+                        color = HeartRed,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center
+                    )
+                )
+            }
+            Spacer(Modifier.height(6.dp))
             BasicText(
-                text = "Botão ou toque: +1 min",
-                style = TextStyle(color = Gray, fontSize = 11.sp, textAlign = TextAlign.Center)
+                text = hint,
+                style = TextStyle(color = Gray, fontSize = 10.sp, textAlign = TextAlign.Center)
             )
         }
     }
