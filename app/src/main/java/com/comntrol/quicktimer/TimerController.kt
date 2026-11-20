@@ -88,6 +88,7 @@ object Haptics {
     val TICK = longArrayOf(0, 40)
     val DENIED = longArrayOf(0, 20, 60, 20)
     val PRE_ALERT = longArrayOf(0, 120, 100, 120)
+    val SECOND = longArrayOf(0, 90)
     val END = longArrayOf(0, 300, 150, 300, 150, 300)
 
     fun vibrate(c: Context, pattern: LongArray) {

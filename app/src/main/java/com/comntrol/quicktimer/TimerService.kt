@@ -36,6 +36,7 @@ class TimerService : Service() {
         private const val CHANNEL = "timer"
         private const val NOTIF_ID = 1001
         private const val PRE_ALERT_MS = 10_000L
+        private const val FINAL_COUNT_MS = 5_000L
 
         fun ensureRunning(c: Context) {
             try {
@@ -75,6 +76,7 @@ class TimerService : Service() {
 
     private suspend fun runLoop() {
         var preAlerted = false
+        var lastBeepSec = Int.MAX_VALUE
         while (scope.isActive) {
             val s = TimerController.state.value
             if (!s.running) break
@@ -93,11 +95,20 @@ class TimerService : Service() {
             }
             if (left > PRE_ALERT_MS + 500) {
                 preAlerted = false
-            } else if (!preAlerted && left <= PRE_ALERT_MS) {
+            } else if (!preAlerted && left <= PRE_ALERT_MS && left > FINAL_COUNT_MS) {
                 preAlerted = true
                 Haptics.vibrate(this, Haptics.PRE_ALERT)
             }
-            delay(100)
+
+            // 5 s finais: uma vibração curta a cada segundo (00:05, 00:04 … 00:01).
+            val sec = ((left + 999) / 1000).toInt()
+            if (sec > FINAL_COUNT_MS / 1000) {
+                lastBeepSec = Int.MAX_VALUE          // tempo somado: rearma a contagem
+            } else if (sec < lastBeepSec) {
+                lastBeepSec = sec
+                Haptics.vibrate(this, Haptics.SECOND)
+            }
+            delay(50)
         }
         stopNow()
     }

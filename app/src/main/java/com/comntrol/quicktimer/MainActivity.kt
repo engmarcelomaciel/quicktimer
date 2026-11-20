@@ -312,44 +312,47 @@ private fun TimerScreen(
             )
         )
 
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(top = 10.dp)
-        ) {
-            BasicText(
-                text = "%02d:%02d".format(mm, ss),
-                maxLines = 1,
-                softWrap = false,
-                modifier = Modifier.graphicsLayer {
+        // Contagem no centro exato da tela
+        BasicText(
+            text = "%02d:%02d".format(mm, ss),
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .graphicsLayer {
                     scaleX = digitScale
                     scaleY = digitScale
                 },
-                style = TextStyle(
-                    color = digitColor,
-                    fontSize = 74.sp,
-                    fontWeight = digitWeight,
-                    fontFamily = FontFamily.SansSerif,
-                    textAlign = TextAlign.Center,
-                    letterSpacing = (-1).sp
-                )
+            style = TextStyle(
+                color = digitColor,
+                fontSize = 74.sp,
+                fontWeight = digitWeight,
+                fontFamily = FontFamily.SansSerif,
+                textAlign = TextAlign.Center,
+                letterSpacing = (-1).sp
             )
-            if (showHr) {
-                Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    HeartIcon(Modifier.size(30.dp))
-                    Spacer(Modifier.width(8.dp))
-                    BasicText(
-                        text = if (heartRate > 0) "$heartRate" else "--",
-                        maxLines = 1,
-                        style = TextStyle(
-                            color = HeartRed,
-                            fontSize = 42.sp,
-                            fontWeight = FontWeight.Medium,
-                            fontFamily = FontFamily.SansSerif
-                        )
+        )
+
+        // Batimentos perto da borda inferior
+        if (showHr) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 26.dp)
+            ) {
+                HeartIcon(Modifier.size(30.dp))
+                Spacer(Modifier.width(8.dp))
+                BasicText(
+                    text = if (heartRate > 0) "$heartRate" else "--",
+                    maxLines = 1,
+                    style = TextStyle(
+                        color = HeartRed,
+                        fontSize = 42.sp,
+                        fontWeight = FontWeight.Medium,
+                        fontFamily = FontFamily.SansSerif
                     )
-                }
+                )
             }
         }
     }
